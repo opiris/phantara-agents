@@ -6,28 +6,34 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { requireEnv, type AgentName } from '@phantara/shared';
 
-let _client: SupabaseClient | null = null;
+// Tipos tolerantes: el generico de SupabaseClient cambio en versiones recientes
+// y endurecio el schema. Usamos `any` en los slots de schema para mantener
+// compatibilidad entre getDb() (schema 'agents') y getPublicDb() (schema 'public').
+type AgentsClient = SupabaseClient<any, any, any>;
+type PublicClient = SupabaseClient<any, any, any>;
+
+let _client: AgentsClient | null = null;
 
 /**
  * Cliente Supabase singleton con service_role key.
  * Schema por defecto: 'agents'.
  */
-export function getDb(): SupabaseClient {
+export function getDb(): AgentsClient {
   if (_client) return _client;
   _client = createClient(requireEnv('SUPABASE_URL'), requireEnv('SUPABASE_SERVICE_ROLE_KEY'), {
     db: { schema: 'agents' },
     auth: { persistSession: false, autoRefreshToken: false },
-  });
+  }) as AgentsClient;
   return _client;
 }
 
 /**
  * Cliente Supabase con schema 'public' (para leer datos de Phantara).
  */
-export function getPublicDb(): SupabaseClient {
+export function getPublicDb(): PublicClient {
   return createClient(requireEnv('SUPABASE_URL'), requireEnv('SUPABASE_SERVICE_ROLE_KEY'), {
     auth: { persistSession: false, autoRefreshToken: false },
-  });
+  }) as PublicClient;
 }
 
 // ============================================================

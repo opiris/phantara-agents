@@ -1,0 +1,6 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "buildCommand": "pnpm install --frozen-lockfile && pnpm typecheck",
+  "startCommand": "pnpm start"
+}

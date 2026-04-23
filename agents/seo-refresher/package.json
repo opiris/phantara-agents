@@ -1,0 +1,20 @@
+{
+  "name": "@phantara/seo-refresher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@phantara/claude": "workspace:*",
+    "@phantara/db": "workspace:*",
+    "@phantara/shared": "workspace:*",
+    "@phantara/telegram": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

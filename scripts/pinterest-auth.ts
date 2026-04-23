@@ -9,7 +9,7 @@
  *        export PINTEREST_APP_SECRET=xxx
  *   4. Ejecuta: pnpm tsx scripts/pinterest-auth.ts
  *   5. Abre el link que imprime, autoriza la app en tu cuenta Pinterest Business
- *   6. El script te devolvera el refresh_token. Copialo a Railway.
+ *   6. El script te devolvera el refresh_token + lista de todos tus tableros con su ID
  */
 
 import { createServer } from 'node:http';
@@ -37,6 +37,10 @@ console.log('Abre esta URL en tu navegador y autoriza la app:');
 console.log('========================================================\n');
 console.log(authUrl.toString());
 console.log('\nEsperando el callback en http://localhost:8787/callback ...\n');
+
+interface BoardsResponse {
+  items?: Array<{ id: string; name: string; privacy?: string; pin_count?: number }>;
+}
 
 const server = createServer(async (req, res) => {
   if (!req.url?.startsWith('/callback')) {
@@ -70,7 +74,7 @@ const server = createServer(async (req, res) => {
   });
 
   try {
-    const response = await fetch('https://api.pinterest.com/v5/oauth/token', {
+    const tokenResponse = await fetch('https://api.pinterest.com/v5/oauth/token', {
       method: 'POST',
       headers: {
         Authorization: `Basic ${basicAuth}`,
@@ -79,7 +83,7 @@ const server = createServer(async (req, res) => {
       body: body.toString(),
     });
 
-    const data = (await response.json()) as {
+    const tokenData = (await tokenResponse.json()) as {
       access_token?: string;
       refresh_token?: string;
       expires_in?: number;
@@ -89,24 +93,61 @@ const server = createServer(async (req, res) => {
       message?: string;
     };
 
-    if (!response.ok || !data.access_token || !data.refresh_token) {
-      throw new Error(`Token exchange failed: ${data.error ?? data.message ?? JSON.stringify(data)}`);
+    if (!tokenResponse.ok || !tokenData.access_token || !tokenData.refresh_token) {
+      throw new Error(
+        `Token exchange failed: ${tokenData.error ?? tokenData.message ?? JSON.stringify(tokenData)}`,
+      );
     }
+
+    const boardsResp = await fetch('https://api.pinterest.com/v5/boards?page_size=100', {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
+
+    const boardsData = (await boardsResp.json()) as BoardsResponse & {
+      code?: number;
+      message?: string;
+    };
 
     console.log('\n========================================================');
     console.log('AUTORIZACION COMPLETADA');
     console.log('========================================================\n');
-    console.log('Copia esto a Railway como variables de entorno:\n');
+
+    if (boardsResp.ok && boardsData.items && boardsData.items.length > 0) {
+      console.log('TUS TABLEROS:\n');
+      for (const board of boardsData.items) {
+        console.log(`  Nombre:    ${board.name}`);
+        console.log(`  ID:        ${board.id}`);
+        console.log(`  Privacy:   ${board.privacy ?? '-'}`);
+        console.log(`  Pins:      ${board.pin_count ?? 0}`);
+        console.log('');
+      }
+    } else if (boardsResp.ok) {
+      console.log('NO TIENES TABLEROS CREADOS TODAVIA.');
+      console.log('Crea uno en pinterest.com y vuelve a ejecutar el script.\n');
+    } else {
+      console.log(`Error listando boards: ${boardsData.message ?? JSON.stringify(boardsData)}\n`);
+    }
+
+    console.log('========================================================');
+    console.log('VARIABLES PARA RAILWAY:');
+    console.log('========================================================\n');
     console.log(`PINTEREST_APP_ID=${APP_ID}`);
     console.log(`PINTEREST_APP_SECRET=${APP_SECRET}`);
-    console.log(`PINTEREST_REFRESH_TOKEN=${data.refresh_token}`);
-    console.log(`\nAccess token (expira en ${data.expires_in}s, se refresca solo):`);
-    console.log(`  ${data.access_token}`);
-    console.log(`\nScope otorgado: ${data.scope}`);
-    console.log(`Refresh token caduca en ${data.refresh_token_expires_in} segundos (~${Math.round((data.refresh_token_expires_in ?? 0) / 86400)} dias).\n`);
+    console.log(`PINTEREST_REFRESH_TOKEN=${tokenData.refresh_token}`);
+    console.log(`PINTEREST_BOARD_ID=<elige el ID del tablero de la lista de arriba>`);
+    console.log(`\nAccess token (expira en ${tokenData.expires_in}s, se refresca solo):`);
+    console.log(`  ${tokenData.access_token}`);
+    console.log(`\nScope: ${tokenData.scope}`);
+    console.log(
+      `Refresh token caduca en ~${Math.round((tokenData.refresh_token_expires_in ?? 0) / 86400)} dias.\n`,
+    );
 
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<h1>Autorizacion completada</h1><p>Vuelve al terminal para ver el refresh_token.</p>');
+    res.end(
+      '<h1>Autorizacion completada</h1><p>Vuelve al terminal para ver el refresh_token y el board_id.</p>',
+    );
 
     setTimeout(() => process.exit(0), 500);
   } catch (err) {

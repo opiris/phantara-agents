@@ -18,7 +18,7 @@ import { URL } from 'node:url';
 const APP_ID = process.env.PINTEREST_APP_ID;
 const APP_SECRET = process.env.PINTEREST_APP_SECRET;
 const REDIRECT_URI = 'http://localhost:8787/callback';
-const SCOPES = 'boards:read,pins:read,pins:write,user_accounts:read';
+const SCOPES = 'boards:read,boards:write,pins:read,pins:write,user_accounts:read';
 
 if (!APP_ID || !APP_SECRET) {
   console.error('Missing PINTEREST_APP_ID or PINTEREST_APP_SECRET env vars.');

@@ -86,7 +86,7 @@ async function refreshAndStore(refreshToken: string): Promise<string> {
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
-    scope: 'boards:read,pins:read,pins:write,user_accounts:read',
+    scope: 'boards:read,boards:write,pins:read,pins:write,user_accounts:read',
   });
 
   const response = await fetch(`${PINTEREST_API}/oauth/token`, {

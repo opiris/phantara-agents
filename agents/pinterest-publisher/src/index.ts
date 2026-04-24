@@ -1,16 +1,8 @@
 /**
- * pinterest-publisher
- * Cron diario 09:00 CET (08:00 UTC): publica 3 pins en Pinterest, uno por idioma.
- *
- * Flujo:
- *   1. Selecciona 3 cartas distintas, una por cada idioma (es/en/pt).
- *      Prioriza cartas con menos pins publicados en ese idioma, luego
- *      las que llevan mas tiempo sin pin.
- *   2. Para cada (card, lang): lee titulo/meta_description de public.tarot_cards_seo,
- *      pide a Claude Haiku un titulo + descripcion optimizados para Pinterest.
- *   3. Publica pin via Pinterest API v5 apuntando a phantara.app/[lang]/tarot/[card]
- *      con imagen publica de Supabase Storage (bucket 'tarot-cards').
- *   4. Guarda en agents.pinterest_pins y notifica a Telegram con enlace.
+ * pinterest-publisher (modo draft manual)
+ * Cron diario 09:00 CET (08:00 UTC): genera 3 borradores de pins y los manda
+ * por Telegram con todo el contenido listo para copy-paste. NO publica a la
+ * API de Pinterest (requiere Standard access que Pinterest no aprueba facil).
  */
 
 import {
@@ -27,7 +19,6 @@ import {
   getPublicDb,
 } from '@phantara/db';
 import { sendMessage, notifyError } from '@phantara/telegram';
-import { createPin } from '@phantara/pinterest';
 import { completeJson, MODELS } from '@phantara/claude';
 
 const AGENT = AGENT_NAMES.PINTEREST_PUBLISHER;
@@ -47,33 +38,38 @@ interface PinContent {
   altText: string;
 }
 
-// ============================================================
-// Seleccion de cartas a publicar
-// ============================================================
+interface GeneratedDraft {
+  card_key: string;
+  lang: Lang;
+  title: string;
+  description: string;
+  altText: string;
+  imageUrl: string;
+  destinationUrl: string;
+}
 
 async function pickCardForLang(lang: Lang, exclude: Set<string>): Promise<string | null> {
   const db = getDb();
 
-  const { data: existingPins, error } = await db
-    .from('pinterest_pins')
-    .select('card_key, published_at')
-    .eq('lang', lang)
-    .not('card_key', 'is', null);
+  const { data: existingDrafts, error } = await db
+    .from('pinterest_drafts')
+    .select('card_key, created_at')
+    .eq('lang', lang);
 
   if (error) {
-    throw new Error(`Failed to read pinterest_pins: ${error.message}`);
+    throw new Error(`Failed to read pinterest_drafts: ${error.message}`);
   }
 
-  const stats = new Map<string, { count: number; lastPublished: number }>();
-  for (const row of existingPins ?? []) {
+  const stats = new Map<string, { count: number; lastCreated: number }>();
+  for (const row of existingDrafts ?? []) {
     if (!row.card_key) continue;
     const prev = stats.get(row.card_key);
-    const t = new Date(row.published_at as string).getTime();
+    const t = new Date(row.created_at as string).getTime();
     if (prev) {
       prev.count += 1;
-      if (t > prev.lastPublished) prev.lastPublished = t;
+      if (t > prev.lastCreated) prev.lastCreated = t;
     } else {
-      stats.set(row.card_key, { count: 1, lastPublished: t });
+      stats.set(row.card_key, { count: 1, lastCreated: t });
     }
   }
 
@@ -96,20 +92,16 @@ async function pickCardForLang(lang: Lang, exclude: Set<string>): Promise<string
       return {
         card_key,
         count: s?.count ?? 0,
-        lastPublished: s?.lastPublished ?? 0,
+        lastCreated: s?.lastCreated ?? 0,
       };
     })
     .sort((a, b) => {
       if (a.count !== b.count) return a.count - b.count;
-      return a.lastPublished - b.lastPublished;
+      return a.lastCreated - b.lastCreated;
     });
 
   return ranked[0]?.card_key ?? null;
 }
-
-// ============================================================
-// Generacion de contenido del pin
-// ============================================================
 
 async function generatePinContent(seo: SeoRow): Promise<PinContent> {
   const langInstructions: Record<Lang, string> = {
@@ -150,23 +142,7 @@ Devuelve SOLO un JSON con esta forma exacta, sin markdown ni texto extra:
   };
 }
 
-// ============================================================
-// Publicacion de un pin
-// ============================================================
-
-interface PublishedPin {
-  card_key: string;
-  lang: Lang;
-  pinId: string;
-  pinUrl: string;
-  title: string;
-}
-
-async function publishSinglePin(
-  cardKey: string,
-  lang: Lang,
-  boardId: string,
-): Promise<PublishedPin> {
+async function generateDraft(cardKey: string, lang: Lang): Promise<GeneratedDraft> {
   const pdb = getPublicDb();
   const { data: seoRow, error: seoErr } = await pdb
     .from('tarot_cards_seo')
@@ -189,53 +165,72 @@ async function publishSinglePin(
     campaign: 'daily_pins',
   });
 
-  const { pinId, url } = await createPin({
-    boardId,
-    title: content.title,
-    description: content.description,
-    link: destinationUrl,
-    imageUrl,
-    altText: content.altText,
-  });
-
   const db = getDb();
-  const { error: insertErr } = await db.from('pinterest_pins').insert({
-    pin_id: pinId,
+  const { error: insertErr } = await db.from('pinterest_drafts').insert({
     card_key: cardKey,
     lang,
     title: content.title,
     description: content.description,
-    link: destinationUrl,
+    alt_text: content.altText,
     image_url: imageUrl,
-    board_id: boardId,
-    utm_campaign: 'daily_pins',
+    destination_url: destinationUrl,
   });
 
   if (insertErr) {
-    console.error(`[${AGENT}] Failed to log pin in DB: ${insertErr.message}`);
+    throw new Error(`Failed to save draft for ${cardKey}/${lang}: ${insertErr.message}`);
   }
 
   return {
     card_key: cardKey,
     lang,
-    pinId,
-    pinUrl: url,
     title: content.title,
+    description: content.description,
+    altText: content.altText,
+    imageUrl,
+    destinationUrl,
   };
 }
 
-// ============================================================
-// Main
-// ============================================================
+function formatTelegramMessage(drafts: GeneratedDraft[]): string {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const flagByLang: Record<Lang, string> = {
+    es: '🇪🇸',
+    en: '🇬🇧',
+    pt: '🇵🇹',
+  };
+
+  let msg = `📌 *PINS DEL DIA* \\- ${escapeMd(today)}\n\n`;
+  msg += `Copia cada bloque en Pinterest manualmente\\.\n\n`;
+
+  let i = 0;
+  for (const d of drafts) {
+    i++;
+    msg += `━━━━━━━━━━━━━━\n`;
+    msg += `*${flagByLang[d.lang]} Pin ${i}/${drafts.length}* \\(${d.lang}\\)\n`;
+    msg += `Carta: \`${escapeMd(d.card_key)}\`\n\n`;
+
+    msg += `*TITULO:*\n\`\`\`\n${d.title}\n\`\`\`\n`;
+    msg += `*DESCRIPCION:*\n\`\`\`\n${d.description}\n\`\`\`\n`;
+    msg += `*ALT TEXT:*\n\`\`\`\n${d.altText}\n\`\`\`\n`;
+    msg += `🖼 [Descargar imagen](${d.imageUrl})\n`;
+    msg += `🔗 [URL destino del pin](${d.destinationUrl})\n\n`;
+  }
+
+  msg += `━━━━━━━━━━━━━━\n`;
+  msg += `_Cuando los publiques, marca cada pin como publicado con el endpoint interno o ignoralo\\._`;
+
+  return msg;
+}
+
+function escapeMd(text: string): string {
+  return text.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+}
 
 async function main(): Promise<void> {
   const ctx = await startExecution(AGENT);
 
   try {
-    const boardId = process.env.PINTEREST_BOARD_ID;
-    if (!boardId) {
-      throw new Error('Missing PINTEREST_BOARD_ID env var');
-    }
     if (!SUPABASE_URL) {
       throw new Error('Missing SUPABASE_URL env var');
     }
@@ -252,13 +247,13 @@ async function main(): Promise<void> {
       selections.push({ cardKey, lang });
     }
 
-    const results: PublishedPin[] = [];
+    const drafts: GeneratedDraft[] = [];
     const errors: Array<{ cardKey: string; lang: Lang; error: string }> = [];
 
     for (const { cardKey, lang } of selections) {
       try {
-        const pin = await publishSinglePin(cardKey, lang, boardId);
-        results.push(pin);
+        const draft = await generateDraft(cardKey, lang);
+        drafts.push(draft);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ cardKey, lang, error: msg });
@@ -266,28 +261,28 @@ async function main(): Promise<void> {
       }
     }
 
-    let summary = `*Publicados ${results.length}/3 pins*\n\n`;
-    for (const p of results) {
-      summary += `✓ \`${p.lang}\` ${p.card_key}\n   [${escapeMd(p.title)}](${p.pinUrl})\n\n`;
-    }
-    if (errors.length > 0) {
-      summary += `\n*Errores:*\n`;
-      for (const e of errors) {
-        summary += `✗ \`${e.lang}\` ${e.cardKey}: ${escapeMd(e.error)}\n`;
-      }
+    if (drafts.length > 0) {
+      const msg = formatTelegramMessage(drafts);
+      await sendMessage(AGENT, msg);
     }
 
-    await sendMessage(AGENT, summary, { disableNotification: errors.length === 0 });
+    if (errors.length > 0) {
+      let errMsg = `*Errores generando borradores:*\n`;
+      for (const e of errors) {
+        errMsg += `\\- \`${e.lang}\` ${escapeMd(e.cardKey)}: ${escapeMd(e.error)}\n`;
+      }
+      await sendMessage(AGENT, errMsg);
+    }
 
     await finishExecution(ctx, {
-      published: results.length,
+      generated: drafts.length,
       failed: errors.length,
-      pins: results.map((r) => ({ card: r.card_key, lang: r.lang, id: r.pinId })),
+      drafts: drafts.map((d) => ({ card: d.card_key, lang: d.lang })),
     });
 
-    console.log(`[${AGENT}] OK (${results.length}/3 published)`);
+    console.log(`[${AGENT}] OK (${drafts.length}/3 drafts generated)`);
 
-    if (results.length === 0 && errors.length > 0) {
+    if (drafts.length === 0 && errors.length > 0) {
       process.exit(1);
     }
   } catch (err) {
@@ -296,10 +291,6 @@ async function main(): Promise<void> {
     console.error(`[${AGENT}] FAILED:`, err);
     process.exit(1);
   }
-}
-
-function escapeMd(text: string): string {
-  return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
 }
 
 main();
